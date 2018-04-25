@@ -35,5 +35,3 @@ The name of the dataset should be the beginning of the hdf5 file ending with "4t
 
 You can also change other hyper parameters for model training, such as learning rate, autoencoder dimensions, etc.
 
-# CPAC
-# CPAC
