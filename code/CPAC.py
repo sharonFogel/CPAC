@@ -5,9 +5,11 @@ import torch.nn as nn
 from torch.autograd import Variable
 import torch.optim
 import numpy as np
-from sklearn.cluster import KMeans, SpectralClustering,AgglomerativeClustering
+from sklearn.cluster import KMeans, AffinityPropagation, MeanShift,SpectralClustering,AgglomerativeClustering
+import hdbscan
 from sklearn.metrics.cluster import adjusted_mutual_info_score
 from sklearn.metrics.cluster import normalized_mutual_info_score
+from sklearn.metrics import silhouette_score, calinski_harabaz_score
 from sklearn.utils.linear_assignment_ import linear_assignment
 from sklearn.decomposition import PCA
 if (sys.version[0] == 2):
@@ -34,6 +36,16 @@ import random
 from functions import *
 from plots import *
 from sklearn.preprocessing import MinMaxScaler, normalize, Normalizer, StandardScaler
+
+
+def adjust_lr(initial_rate, epoch, lr_epoch_update, lr_change_rate):
+    """
+    Sets the learning rate to the initial LR decayed by lr_change_rate every lr_epoch_update
+    similar to step_decay in keras implementation
+    """
+    factor = int(epoch / lr_epoch_update)
+    lr = initial_rate * (lr_change_rate ** factor)
+    return lr
 
 class CPAC(nn.Module):
     def __init__(self,
@@ -147,7 +159,7 @@ class CPAC(nn.Module):
 
     def forward(self, x1, x2):
         """
-        forward pass in the clustering and ae layers. The output is the encoded and decoded data of the two
+        forward pass in the clustering and ae layers. The output is the encodeing and decoding of the two
         points and their distance.
         :param x1:
         :param x2:
@@ -176,7 +188,12 @@ class CPAC(nn.Module):
                 mu_epoch_update=None,
                 learning_rate_c=0.001,
                 conn_mat_var='Z',
-                save_net=False
+                save_net=False,
+                ADMM=False,
+                epochs_u=1,
+                epochs_z=1,
+                knn=False,
+                lr_lm=0.1
                 ):
         self.clust_method = clust_method
         self.learning_rate_c = learning_rate_c
@@ -216,16 +233,28 @@ class CPAC(nn.Module):
         n_samples = len(encoded_data_np)
         if lr_u == None:
             lr_u = 0.01
-            if len(self.E.data/float(n_samples**2)) < 0.002:
+            if len(self.E.data)/float(n_samples**2/2.0) < 0.002:
                 lr_u = 0.04
             if use_vgg:
                 lr_u = 0.1
+            if ADMM:
+                lr_u=0.04
         if mu_epoch_update == None:
             mu_epoch_update = 30
-            if use_vgg and len(self.E.data/float(n_samples**2)) > 0.002:
-                mu_epoch_update = 10
-
-
+            if ADMM:
+                if len(self.E.data) / float(n_samples ** 2 / 2.0) < 0.002:
+                    mu_epoch_update = 60
+                    if use_vgg:
+                        lr_u=0.1
+                else:
+                    mu_epoch_update=10
+                    if num_constraints > 500:
+                        mu_epoch_update = 20
+                    if use_vgg:
+                        mu_epoch_update = 40
+            else:
+                if use_vgg and len(self.E.data)/float(n_samples**2/2.0) < 0.002:
+                    mu_epoch_update = 10
 
         if isinstance(dataset.train_labels, np.ndarray):
             y=dataset.train_labels
@@ -279,8 +308,9 @@ class CPAC(nn.Module):
             if num_constraints>0:
                 plot_pca_constraints(dataset, encoded_data_np, i_cl_row, i_cl_col, idx_tsne, 0)
             else:
-                plot_tsne(y, encoded_data_np, idx_tsne, 0)
+                # plot_tsne(y, encoded_data_np, idx_tsne, 0)
                 plot_pca(y, encoded_data_np, idx_tsne, 0)
+                plot_connections(y,encoded_data_np,range(len(y)), 0, self.E)
 
         #converting into data pairs:
         pairs = PairingDataset(dataset, self.W, self.E, constraints_type=1)
@@ -290,10 +320,20 @@ class CPAC(nn.Module):
         data_loader = torch.utils.data.DataLoader(dataset=pairs, batch_size=self.batch_size_c, shuffle=True, pin_memory=True)
         self.optimizer = torch.optim.RMSprop([{'params': self.autoencoder.parameters()}, {'params':[self.u], 'lr':lr_u}],
                                           lr=self.learning_rate_c)
+        if ADMM:
+            # create seperate optimizers to train u and the autoencoder separately
+            optimizer_u = torch.optim.RMSprop([self.u], lr=lr_u)
+            optimizer_ae = torch.optim.RMSprop(self.autoencoder.parameters(), lr=self.learning_rate_c)
         self.accuracy = []
         self.ami = []
         self.nmi = []
         self.total_loss = []
+        self.clust_loss = []
+        self.ml_clust_loss = []
+        self.reconst_loss = []
+        self.rep_loss = []
+        self.rep_mult = []
+        rep_mul = 0
         self.delta_label = []
         graph, y_pred, num_components = calculate_clusters(self.clust_method, self.E, self.epsilon,
                                                                 self.final_conn_threshold, self.u, self.n_clusters)
@@ -322,6 +362,8 @@ class CPAC(nn.Module):
         rep_factor = 1/float(encoded_len)
         label_percent = num_constraints / float(len(self.E.row))
         plot_tsne_interval = 30
+        ADMM_cycle = epochs_u+epochs_z
+        lm = Variable(torch.zeros(self.u.shape),requires_grad=False).cuda()
         for epoch in range(0, epochs_max):
             sys.stdout.write('\r')
             # train on batch
@@ -342,7 +384,7 @@ class CPAC(nn.Module):
                 _, encoded_data1, decoded_data1, encoded_data2, decoded_data2 = self(x1, x2)
                 dist = torch.sum((u1 - u2) ** 2, 1)
                 w_mknn_ul = w*Variable((conn_type==1).type(torch.FloatTensor),requires_grad=False).cuda()
-                clust_loss = torch.sum(w_mknn_ul * mu_gmc2 * dist / (mu_gmc2 + dist))
+                clust_loss =  torch.sum(w_mknn_ul * mu_gmc2 * dist / (mu_gmc2 + dist))
                 # must-link loss:
                 w_ml = w*Variable((conn_type==2).type(torch.FloatTensor),requires_grad=False).cuda()
                 ml_loss = 1/(label_percent+1e-7)*torch.sum(w_ml * mu_gmc2 * dist / (mu_gmc2 + dist))
@@ -355,21 +397,48 @@ class CPAC(nn.Module):
                 rep_dists2 = torch.sum((u2 - encoded_data2) ** 2, 1)
                 rep_loss = torch.sum(w_reconst1 * mu_gmc1 * rep_dists1 / (rep_dists1 + mu_gmc1)) + \
                            torch.sum(w_reconst2 * mu_gmc1 * rep_dists2 / (rep_dists2 + mu_gmc1))
-                tot_loss = 1/float(self.batch_size_c)*(rep_factor * (lamda * clust_loss + lamda_ml * ml_loss)
-                                                       + rep_factor*rep_loss + reconst_factor*reconst_loss)
-                self.optimizer.zero_grad()
-                tot_loss.backward()
-                self.optimizer.step()
-            print('clust loss: %f ml loss: %f reconst ae loss:%f  representation loss:%f total loss:%f' %
-                  (1/float(self.batch_size_c)*lamda * rep_factor * clust_loss.data[0],
-                   1 / float(self.batch_size_c) * lamda_ml * rep_factor * ml_loss.data[0],
-                   1/float(self.batch_size_c) * reconst_factor * reconst_loss.data[0],
-                   1 / float(self.batch_size_c) * rep_factor * rep_loss.data[0], tot_loss.data[0]))
+                tot_loss = 1 / float(self.batch_size_c) * (rep_factor * (lamda * clust_loss + lamda_ml * ml_loss)
+                                                           + rep_factor * rep_loss + reconst_factor * reconst_loss)
+
+                if ADMM:
+                    lm1 = lm.index_select(0, Variable(idx1.long(), requires_grad=False).cuda())
+                    lm2 = lm.index_select(0, Variable(idx2.long(), requires_grad=False).cuda())
+                    rep_mul = 1 / float(self.batch_size_c) * rep_factor * (torch.sum(lm1*(u1 - encoded_data1)) + torch.sum(lm2*(u2 - encoded_data2)))
+                    tot_loss = tot_loss - rep_mul
+                    if epoch%ADMM_cycle<epochs_u:
+                        optimizer_u.zero_grad()
+                        tot_loss.backward()
+                        optimizer_u.step()
+                    else:
+                        optimizer_ae.zero_grad()
+                        tot_loss.backward()
+                        optimizer_ae.step()
+                    rep_mul = rep_mul.data[0]
+                else:
+                    self.optimizer.zero_grad()
+                    tot_loss.backward()
+                    self.optimizer.step()
+            clust_loss = 1/float(self.batch_size_c)*lamda * rep_factor * clust_loss.data[0]
+            ml_loss = 1 / float(self.batch_size_c) * lamda_ml * rep_factor * ml_loss.data[0]
+            reconst_loss = 1/float(self.batch_size_c) * reconst_factor * reconst_loss.data[0]
+            rep_loss = 1 / float(self.batch_size_c) * rep_factor * rep_loss.data[0]
+            tot_loss = tot_loss.data[0]
+
+            print('clust loss: %f ml loss: %f reconst ae loss:%f  representation loss:%f lagrange mult loss:%f total loss:%f' %
+                  (clust_loss, ml_loss, reconst_loss, rep_loss, rep_mul, tot_loss))
 
             # change mu1 and mu2 every mu_epoch_update:
             if (epoch+1) % mu_epoch_update == 0:
                 mu_gmc1 = max(mu_gmc1/2, float(self.delta1/2))
                 mu_gmc2 = max(mu_gmc2/2, float(self.delta2/2))
+            if epoch % ADMM_cycle == 0:
+                dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=1000, shuffle=False)
+                encoded_data_np = torch.FloatTensor().cuda()
+                for i_batch, (x, _) in enumerate(dataloader):
+                    x = Variable(x.type(torch.FloatTensor)).cuda()
+                    encoded = self.autoencoder(x)[0]
+                    encoded_data_np = torch.cat([encoded_data_np, encoded.data])
+                lm = lm + lr_lm * rep_factor * (Variable(encoded_data_np, requires_grad=False) - self.u)
 
             graph, y_pred, num_components = calculate_clusters(self.clust_method, self.E, self.epsilon,
                                                                 self.final_conn_threshold, self.u, self.n_clusters)
@@ -382,10 +451,18 @@ class CPAC(nn.Module):
                 self.ami.append(ami)
                 self.nmi.append(nmi)
                 self.delta_label.append(delta_label)
-                self.total_loss.append(float(tot_loss.data.cpu().numpy()))
+                self.total_loss.append(tot_loss)
+                self.clust_loss.append(clust_loss)
+                self.ml_clust_loss.append(ml_loss)
+                self.reconst_loss.append(reconst_loss)
+                self.rep_loss.append(rep_loss)
+                self.rep_mult.append(rep_mul)
+
                 print('epoch ' + str(epoch) + ', Accuracy ' + str(np.round(acc, 5)) +
                       ', AMI ' + str(np.round(ami, 5)) + ', NMI ' + str(np.round(nmi, 5)) +
                       ', number of clusters ' + str(num_components))
+
+
 
                 if plot_tsne_bool and ((epoch+1) % plot_tsne_interval)==0:
                     dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=1000, shuffle=False)
@@ -400,8 +477,9 @@ class CPAC(nn.Module):
                         plot_tsne_constraints(dataset, self.u.data.cpu().numpy(), i_cl_row, i_cl_col, idx_tsne, epoch+1)
 
                     else:
-                        plot_tsne(y,  self.u.data.cpu().numpy(), idx_tsne, epoch+1)
+                        # plot_tsne(y,  self.u.data.cpu().numpy(), idx_tsne, epoch+1)
                         plot_pca(y, self.u.data.cpu().numpy(), idx_tsne, epoch+1)
+                        plot_connections(y, self.u.data.cpu().numpy(), range(len(y)), epoch+1, self.E)
 
         if plot or plot_tsne_bool:
             plt.ioff()
@@ -413,17 +491,22 @@ class CPAC(nn.Module):
                                     format(dataset=dataset.name, lr=self.learning_rate_c, lr_u=lr_u,
                                            mu_epoch=mu_epoch_update, n=n_neighbors,
                                            clust_method=clust_method, conn_var=conn_mat_var) \
-                                + (num_constraints>0) * 'num_constraints{num_constraints}'.format(num_constraints=num_constraints)
+                                + (num_constraints>0) * 'num_constraints{num_constraints}'.format(num_constraints=num_constraints)\
+                                + ADMM*'ADMM'
             with open(results_file_name + '.pkl', 'w') as f:  # Python 3: open(..., 'wb')
-                pickle.dump([self.accuracy, self.ami, self.nmi, self.total_loss, self.delta_label,y_pred], f)
-            plot_results(acc=self.accuracy, ami=self.ami, nmi=self.nmi, delta_label=self.delta_label,
-                         total_loss=self.total_loss, plot_name=results_file_name)
+                pickle.dump([self.accuracy, self.ami, self.nmi, self.clust_loss, self.ml_clust_loss, self.reconst_loss,
+                             self.rep_loss, self.rep_mult, self.total_loss, self.delta_label, y_pred], f)
+            plot_results(acc=self.accuracy, ami=self.ami, nmi=self.nmi, clust_loss=self.clust_loss,
+                         ml_loss=self.ml_clust_loss, reconst_loss=self.reconst_loss, rep_loss=self.rep_loss,
+                         rep_mult=self.rep_mult, total_loss=self.total_loss, plot_name=results_file_name)
         if save_net:
             net_file_name = './dataset_{dataset}_lr{lr}_u{lr_u}_{conn_var}_mu{mu_epoch}_clust{clust_method}_MKNN{n}'. \
                                     format(dataset=dataset.name, lr=self.learning_rate_c, lr_u=lr_u,
                                            mu_epoch=mu_epoch_update, n=n_neighbors,
                                            clust_method=clust_method, conn_var=conn_mat_var) \
-                                + (num_constraints>0) * 'num_constraints{num_constraints}'.format(num_constraints=num_constraints)
+                                + (num_constraints>0) * 'num_constraints{num_constraints}'.format(num_constraints=num_constraints) \
+                            + ADMM*'ADMM'
 
             torch.save([self.autoencoder.state_dict(), self.u.data, y_pred_fit], net_file_name)
+
         return self.y_pred

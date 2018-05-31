@@ -1,25 +1,11 @@
-import torch
-import torchvision
 from CPAC import CPAC
-import numpy as np
 from create_datasets import *
-from torchvision import datasets
 from torchvision import transforms
-from torchvision.datasets import MNIST
-import torchvision
 import matplotlib as mpl
 mpl.use('Agg')
-import matplotlib.pyplot as plt
-import numpy as np
 import argparse
-import os
 from lw_ae import lw_ae
 from pretrained_model import *
-from sklearn.cluster import KMeans, SpectralClustering, DBSCAN, MeanShift, AffinityPropagation
-from sklearn.metrics.cluster import adjusted_mutual_info_score
-from sklearn.metrics.cluster import normalized_mutual_info_score
-from sklearn.utils.linear_assignment_ import linear_assignment
-import copy
 
 # setting parameters
 parser = argparse.ArgumentParser(description='CPAC Clustering')
@@ -84,14 +70,14 @@ parser.add_argument('--conn-mat-var', type=str, metavar='<conn_mat_var>',
 parser.add_argument('--batch-size-c', type=int, metavar='<batch_size_c>',
                    help='batch size for training clustering', default=128, required=False)
 parser.add_argument('--learning-rate-c', type=float, metavar='<learning_rate_c>',
-                   help='learning rate for clustering training', default=0.001, required=False)
+                   help='learning rate for clustering training', default=0.0001, required=False)
 parser.add_argument('--learning-rate-u', type=float, metavar='<learning_rate_u>',
                    help='learning rate for clustering training for u', default=None, required=False)
 parser.add_argument('--mu-epoch-update', type=int, metavar='<mu_epoch_update>',
                    help='epochs between mu update, default is 30', default=None, required=False)
 parser.add_argument('--max-cluster-epochs', type=int, metavar='<max_cluster_epochs>',
                     help='The number of training epochs for clustering', required=False,
-                    default=int(500))
+                    default=int(1000))
 parser.add_argument('--output', type=str, metavar='<file path>',
                     help='Path to output file, which contains the clustering results', required=False)
 parser.add_argument('--clust-method', type=str, metavar='<clust_method>',
@@ -99,6 +85,14 @@ parser.add_argument('--clust-method', type=str, metavar='<clust_method>',
                     default='MKNN')
 parser.add_argument("--save-net", help="save final network, default=False",
                     action="store_true")
+parser.add_argument("--ADMM", help="use ADMM framework for training, default=False",
+                    action="store_true")
+parser.add_argument('--epochs-u', type=int, metavar='<epochs_u>',
+                   help='number of epochs training on u in ADMM framework', default=1, required=False)
+parser.add_argument('--epochs-z', type=int, metavar='<epochs_z>',
+                   help='number of epochs training on z in ADMM framework', default=1, required=False)
+parser.add_argument('--lr-lm', type=float, metavar='<lr_lm>',
+                   help='learning rate lagrange multiplier', default=0.01, required=False)
 
 
 # get all parameters
@@ -147,12 +141,16 @@ mu_epoch_update = args.mu_epoch_update
 max_cluster_epochs = args.max_cluster_epochs
 output_file_path = args.output
 clust_method = args.clust_method
+ADMM = args.ADMM
+epochs_u = args.epochs_u
+epochs_z = args.epochs_z
+lr_lm = args.lr_lm
 
 if encoder_weights_path is not None and encoder_weights_output_path is not None:
     parser.error("Cannot provider both input and output path for autoencoder weights")
 
 #prepare data
-torch.manual_seed(1)
+torch.manual_seed(2)
 
 img_transform = transforms.Compose([
         transforms.ToTensor(),
@@ -176,6 +174,11 @@ if length>0:
     dataset.train_labels = new_labels
     dataset.train_data = new_data
 
+# a = dataset.train_labels<10
+# dataset.train_labels = dataset.train_labels[a]
+# dataset.train_data = dataset.train_data[a, :, :, :]
+
+
 # create autoencoder
 data_size = dataset.train_data.shape
 if use_vgg19:
@@ -184,19 +187,19 @@ if use_vgg19:
     y_true = dataset.train_labels
 else:
     if len(dataset.train_data.shape)<3:
-        [dataset.train_data.shape[1]] + ae_dims
+        ae_dims = [dataset.train_data.shape[1]] + ae_dims
     else:
         ae_dims = [dataset.train_data.shape[1]*dataset.train_data.shape[2]*dataset.train_data.shape[3]]+ae_dims
 
 ae = lw_ae(data_size,ae_dims, dropout)
 
-#create CPAC net:
 cluster_net = CPAC(autoencoder=ae,
-                      learning_rate_ae=learning_rate_ae,
-                      pretrained_weights_path=encoder_weights_path,
-                      batch_size_ae=batch_size_ae,
-                      batch_size_c=batch_size_c,
-                      )
+                   learning_rate_ae=learning_rate_ae,
+                   pretrained_weights_path=encoder_weights_path,
+                   batch_size_ae=batch_size_ae,
+                   batch_size_c=batch_size_c,
+                   )
+
 
 # train autoencoder
 cluster_net.initialize(dataset=dataset,
@@ -208,21 +211,25 @@ cluster_net.initialize(dataset=dataset,
 
 # train clustering
 y_pred = cluster_net.cluster(dataset=dataset,
-                          use_vgg=use_vgg19,
-                          epochs_max=max_cluster_epochs,
-                          plot=plot_reconst,
-                          plot_tsne_bool=plot_tsne,
-                          not_calculate_conn_mat=not_calculate_conn_mat,
-                          conn_mat_path=conn_mat_path,
-                          dist_meas=dist_meas,
-                          n_neighbors=n_neighbors,
-                          num_constraints=num_constraints,
-                          final_conn_threshold=final_conn_threshold,
-                          clust_method=clust_method,
-                          save_result=True,
-                          lr_u = learning_rate_u,
-                          mu_epoch_update=mu_epoch_update,
-                          learning_rate_c=learning_rate_c,
-                          conn_mat_var=conn_mat_var,
-                          save_net=save_net
-                          )
+                             use_vgg=use_vgg19,
+                             epochs_max=max_cluster_epochs,
+                             plot=plot_reconst,
+                             plot_tsne_bool=plot_tsne,
+                             not_calculate_conn_mat=not_calculate_conn_mat,
+                             conn_mat_path=conn_mat_path,
+                             dist_meas=dist_meas,
+                             n_neighbors=n_neighbors,
+                             num_constraints=num_constraints,
+                             final_conn_threshold=final_conn_threshold,
+                             clust_method=clust_method,
+                             save_result=True,
+                             lr_u = learning_rate_u,
+                             mu_epoch_update=mu_epoch_update,
+                             learning_rate_c=learning_rate_c,
+                             conn_mat_var=conn_mat_var,
+                             save_net=save_net,
+                             ADMM=ADMM,
+                             epochs_u=epochs_u,
+                             epochs_z=epochs_z,
+                             lr_lm=lr_lm
+                             )

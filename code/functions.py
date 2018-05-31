@@ -109,8 +109,7 @@ def connectivity_structure_Loss_constraints(dataset, encoded_data, mu_gmc2, E, W
              and 2 where there were true mknn connection
     """
     y = dataset.train_labels
-    if E is None:
-        E, W, connections_per_point = connectivity_structure(X, n_neighbors)
+    len_plot=20
     n_labeled = int(min(num_constraints, len(E.row)))  # number of labeled pairs
     # calculating the clustering loss of all the MKNN pairs:
     encoded_data1 = encoded_data[E.row, ]
@@ -134,7 +133,7 @@ def connectivity_structure_Loss_constraints(dataset, encoded_data, mu_gmc2, E, W
         images_pairs = np.zeros([len_plot, 2, dataset.train_data.shape[1], dataset.train_data.shape[2]])
         images_pairs[:,0,:,:] = np.squeeze(dataset.train_data[idx_row[0:len_plot]])
         images_pairs[:,1,:,:] = np.squeeze(dataset.train_data[idx_col[0:len_plot]])
-        plot_cl_pairs_images(np.rot90(np.flip(images_pairs, 3), axes=(2, 3)), cl_places, dataset.name)
+        plot_cl_pairs_images(np.rot90(np.flip(images_pairs, 3), axes=(2, 3)), cl_places)
     # calculating the new E and W:
     idx_row_true = idx_row[idx_idx_true]
     idx_col_true = idx_col[idx_idx_true]

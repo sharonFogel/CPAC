@@ -13,6 +13,7 @@ if (sys.version[0] == 2):
     import cPickle as pickle
 else:
     import pickle
+import random
 
 def plot_tsne(y, encoded_data, idx_tsne, epoch):
     #preparing colormap:
@@ -36,6 +37,7 @@ def plot_tsne(y, encoded_data, idx_tsne, epoch):
     plt.colorbar(CB, ticks=range(num_labels))
     plt.clim(-0.5, float(num_labels) - 0.5)
     plt.savefig('./tsne_epoch_{}.png'.format(epoch))
+    return u_tsne
 
 
 def plot_pca(y, encoded_data, idx_tsne, epoch):
@@ -62,6 +64,7 @@ def plot_pca(y, encoded_data, idx_tsne, epoch):
     plt.colorbar(CB, ticks=range(num_labels))
     plt.clim(-0.5, float(num_labels) - 0.5)
     plt.savefig('./pca_epoch_{}.png'.format(epoch))
+    return u_pca
 
 
 def frame_image(img, frame_width, frame_color):
@@ -195,7 +198,25 @@ def plot_pca_constraints(dataset, encoded_data, i_cl_row,i_cl_col,idx_tsne, epoc
                  markerfacecolor=color, markeredgewidth=0.1)
     plt.savefig('./pca_epoch_{}.png'.format(epoch))
 
-def plot_results(acc,ami,nmi,total_loss,delta_label,plot_name):
+
+def plot_connections(y,encoded_data,idx_tsne, epoch, E):
+    u_pca = plot_pca(y, encoded_data, idx_tsne, epoch)
+    idx = random.sample(range(0, len(E.row)), min(len(E.row), len(E.row)))
+    for i in idx:
+        if y[E.row[i]]==y[E.col[i]]:
+            color = 'b'
+        else:
+            color='r'
+        plt.plot([u_pca[E.row[i], 0], u_pca[E.col[i], 0]],
+                 [u_pca[E.row[i], 1], u_pca[E.col[i], 1]],
+                 color=color, marker='o', markersize=0.001,
+                 markerfacecolor='k', markeredgewidth=0.001)
+        plt.ylim(-50, 50)
+        plt.xlim(-50, 50)
+    plt.savefig('./connections_epoch_{}.png'.format(epoch))
+
+def plot_results(acc, ami, nmi, clust_loss, ml_loss,
+                 reconst_loss, rep_loss, rep_mult, total_loss, plot_name):
     """
     plots the result of the clustering run
     :param acc:
@@ -209,10 +230,19 @@ def plot_results(acc,ami,nmi,total_loss,delta_label,plot_name):
     epochs = range(0, len(acc), 1)
     fig = plt.figure()
     ax1 = fig.add_subplot(111)
-    tot_loss_plot = ax1.plot(epochs[0:-1], total_loss, 'b-', label='total loss')
-    ax1.set_ylabel('total_loss')
+    tot_loss_plot = ax1.plot(epochs[0:-1], total_loss, 'b--', label='total loss')
+    clust_loss_plot = ax1.plot(epochs[0:-1], clust_loss, 'y--', label='clust_loss')
+    ml_loss_plot = ax1.plot(epochs[0:-1], ml_loss, 'c--', label='ml_loss')
+    rec_loss_plot = ax1.plot(epochs[0:-1], ml_loss, 'm--', label='ml_loss')
+    rep_loss_plot = ax1.plot(epochs[0:-1], rep_loss, 'g--', label='rep_loss')
+    rep_mult_plot = ax1.plot(epochs[0:-1], rep_mult, 'r--', label='rep_mult')
+    ax1.set_ylabel('losses')
+    ax1.set_ylim(0,100)
     # plt.legend(bbox_to_anchor=(1., 1.),bbox_transform=plt.gcf().transFigure, loc=2, fontsize='small')
     plt.legend(loc=2, fontsize='small')
+
+    diff_loss = np.abs(np.asarray(total_loss[1:len(total_loss)])-np.asarray(total_loss[0:-1]))
+    diff_loss_plot = ax1.plot(epochs[0:-2], diff_loss, 'k-', label='diff loss')
 
     ax2 = ax1.twinx()
     acc_plot = ax2.plot(epochs, acc, 'r-', label='acc')
@@ -221,7 +251,6 @@ def plot_results(acc,ami,nmi,total_loss,delta_label,plot_name):
         tl.set_color('r')
     ami_plot = ax2.plot(epochs, ami, 'g-', label='ami')
     nmi_plot = ax2.plot(epochs, nmi, 'm-', label='nmi')
-    delta_label_plot = ax2.plot(epochs[0:-1], delta_label, 'c-', label='delta label')
 
     plt.legend(loc=2, fontsize='small')
     plt.savefig(plot_name+'.png')

@@ -60,19 +60,18 @@ class lw_ae(nn.Module):
                 nn.ReLU()
             ))
             self.decoders.append(nn.Sequential(
-                nn.Dropout(self.dropout), # added 14.1.18
+                nn.Dropout(self.dropout),
                 nn.Linear(dims[1], dims[0]),
                 Reshape([channels, w, w2])
                 ))
         else:
             self.encoders.append(nn.Sequential(
                 nn.Dropout(self.dropout),
-                Flatten(),
                 nn.Linear(dims[0], dims[1]),
                 nn.ReLU()
             ))
             self.decoders.append(nn.Sequential(
-                nn.Dropout(self.dropout),  # added 14.1.18
+                nn.Dropout(self.dropout),  
                 nn.Linear(dims[1], dims[0]),
             ))
         if len(dims)>1:
